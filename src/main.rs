@@ -1,60 +1,78 @@
+use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 struct Dependency {
     name: String,
-    hash: Option<String>,
     expected_hash: String,
 }
 
 impl Dependency {
-    fn from(node: roxmltree::Node) -> Self {
-        Dependency {
-            name: node.attribute("Name").unwrap().to_owned(),
-            hash: node.attribute("Hash").map(|s| s.to_owned()),
-            expected_hash: node.attribute("ExpectedHash").unwrap().to_owned(),
-        }
+    fn from(node: roxmltree::Node) -> Result<Self> {
+        Ok(Dependency {
+            name: node
+                .attribute("Name")
+                .context("missing attribute 'Name'")?
+                .to_owned(),
+            expected_hash: node
+                .attribute("ExpectedHash")
+                .context("missing attribute 'ExpectedHash'")?
+                .to_owned(),
+        })
     }
 }
 
-fn main() {
+fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
-    if !Path::new("deps_cache").exists() {
-        println!("./deps_cache directory does not exit");
-        return;
+    let cache = Path::new("deps_cache");
+    if !cache.exists() {
+        bail!("./deps_cache directory does not exit");
     }
     if args.len() >= 3 {
         match args[1].as_str() {
             "cache" => {
                 for path in &args[2..] {
                     println!("caching {}", path);
-                    build_cache(PathBuf::from(path));
+                    build_cache(cache, Path::new(path))?;
                 }
-                return;
+                return Ok(());
             }
             "restore" => {
                 for path in &args[2..] {
                     println!("restoring {}", path);
-                    return restore_cache(PathBuf::from(path));
+                    restore_cache(cache, Path::new(path))?;
                 }
-                return;
+                return Ok(());
             }
             _ => {}
         }
     }
-    println!("usage: [cache/restore] [unreal engine root dirs...]")
+    Err(anyhow!(
+        "usage: [cache/restore] [unreal engine root dirs...]"
+    ))
 }
 
-fn restore_cache<P: AsRef<Path>>(ue: P) {
-    let cache = PathBuf::from("deps_cache");
-    let config = std::fs::read_to_string(ue.as_ref().join(".ue4dependencies")).unwrap();
-    let xml = roxmltree::Document::parse(&config).unwrap();
+fn hash(bytes: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
 
-    let dependencies = xml
-        .descendants()
+fn get_dependencies<P: AsRef<Path>>(path: P) -> Result<Vec<Dependency>> {
+    let config = std::fs::read_to_string(path.as_ref().join(".ue4dependencies"))
+        .context("could not read .ue4dependencies, is this an Unreal Engine repository?")?;
+    let xml = roxmltree::Document::parse(&config).context("failed to parse .ue4dependencies")?;
+
+    xml.descendants()
         .filter(|e| e.has_tag_name("File"))
         .map(Dependency::from)
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn restore_cache<P: AsRef<Path>>(cache: P, ue: P) -> Result<()> {
+    let cache = cache.as_ref();
+    let dependencies = get_dependencies(&ue)?;
     let bar = indicatif::ProgressBar::new(dependencies.len() as u64);
 
     use rayon::prelude::*;
@@ -63,23 +81,17 @@ fn restore_cache<P: AsRef<Path>>(ue: P) {
         let dep_path = root.join(&dep.name);
 
         let restore = if cache.join(&dep_path).exists() {
-            use crypto::digest::Digest;
-            use crypto::sha1::Sha1;
-
             let bytes = std::fs::read(&dep_path).unwrap();
-            let mut hasher = Sha1::new();
-            hasher.input(&bytes);
-            let hash = hasher.result_str();
-            hash != dep.expected_hash
+            hash(&bytes) != dep.expected_hash
         } else {
             true
         };
 
         if restore {
             let cache_path = cache.join(dep.expected_hash);
-            if let Ok(bytes) = std::fs::read(&cache_path) {
+            if let Ok(bytes) = std::fs::read(cache_path) {
                 std::fs::create_dir_all(Path::parent(&dep_path).unwrap()).unwrap();
-                std::fs::write(&dep_path, &bytes).unwrap();
+                std::fs::write(&dep_path, bytes).unwrap();
             } else {
                 bar.println(format!("missing in cache {}", dep.name));
             }
@@ -88,34 +100,24 @@ fn restore_cache<P: AsRef<Path>>(ue: P) {
         bar.inc(1);
     });
     bar.finish();
+    Ok(())
 }
 
-fn build_cache<P: AsRef<Path>>(ue: P) {
-    let cache = PathBuf::from("deps_cache");
-    let config = std::fs::read_to_string(ue.as_ref().join(".ue4dependencies")).unwrap();
-    let xml = roxmltree::Document::parse(&config).unwrap();
-
-    let dependencies = xml
-        .descendants()
-        .filter(|e| e.has_tag_name("File"))
-        .map(Dependency::from)
-        .collect::<Vec<_>>();
+fn build_cache<P: AsRef<Path>>(cache: P, ue: P) -> Result<()> {
+    let cache = cache.as_ref();
+    let dependencies = get_dependencies(&ue)?;
     let bar = indicatif::ProgressBar::new(dependencies.len() as u64);
 
-    use rayon::prelude::*;
     let root = PathBuf::from(ue.as_ref());
 
-    let cache = |dep: &Dependency| -> Result<(), std::io::Error> {
-        //bar.println(&dep.name);
-
+    let cache = |dep: &Dependency| -> Result<()> {
         if !cache.join(&dep.expected_hash).exists() {
-            use crypto::digest::Digest;
-            use crypto::sha1::Sha1;
+            use sha1::{Digest, Sha1};
 
             let bytes = std::fs::read(root.join(&dep.name))?;
             let mut hasher = Sha1::new();
-            hasher.input(&bytes);
-            let hash = hasher.result_str();
+            hasher.update(&bytes);
+            let hash = hex::encode(hasher.finalize());
             if hash == dep.expected_hash {
                 let tmp = cache.join(format!(".{}", hash));
                 std::fs::write(&tmp, &bytes)?;
@@ -125,6 +127,7 @@ fn build_cache<P: AsRef<Path>>(ue: P) {
         Ok(())
     };
 
+    use rayon::prelude::*;
     dependencies.into_par_iter().for_each(|dep| {
         if let Err(e) = cache(&dep) {
             bar.println(format!(
@@ -136,4 +139,6 @@ fn build_cache<P: AsRef<Path>>(ue: P) {
         bar.inc(1);
     });
     bar.finish();
+
+    Ok(())
 }
