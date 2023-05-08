@@ -1,4 +1,4 @@
-use std::path::{PathBuf, Path};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 struct Dependency {
@@ -30,16 +30,16 @@ fn main() {
                     println!("caching {}", path);
                     build_cache(PathBuf::from(path));
                 }
-                return
-            },
+                return;
+            }
             "restore" => {
                 for path in &args[2..] {
                     println!("restoring {}", path);
                     return restore_cache(PathBuf::from(path));
                 }
-                return
-            },
-            _ => { }
+                return;
+            }
+            _ => {}
         }
     }
     println!("usage: [cache/restore] [unreal engine root dirs...]")
@@ -50,7 +50,11 @@ fn restore_cache<P: AsRef<Path>>(ue: P) {
     let config = std::fs::read_to_string(ue.as_ref().join(".ue4dependencies")).unwrap();
     let xml = roxmltree::Document::parse(&config).unwrap();
 
-    let dependencies = xml.descendants().filter(|e| e.has_tag_name("File")).map(Dependency::from).collect::<Vec<_>>();
+    let dependencies = xml
+        .descendants()
+        .filter(|e| e.has_tag_name("File"))
+        .map(Dependency::from)
+        .collect::<Vec<_>>();
     let bar = indicatif::ProgressBar::new(dependencies.len() as u64);
 
     use rayon::prelude::*;
@@ -91,7 +95,11 @@ fn build_cache<P: AsRef<Path>>(ue: P) {
     let config = std::fs::read_to_string(ue.as_ref().join(".ue4dependencies")).unwrap();
     let xml = roxmltree::Document::parse(&config).unwrap();
 
-    let dependencies = xml.descendants().filter(|e| e.has_tag_name("File")).map(Dependency::from).collect::<Vec<_>>();
+    let dependencies = xml
+        .descendants()
+        .filter(|e| e.has_tag_name("File"))
+        .map(Dependency::from)
+        .collect::<Vec<_>>();
     let bar = indicatif::ProgressBar::new(dependencies.len() as u64);
 
     use rayon::prelude::*;
@@ -119,7 +127,11 @@ fn build_cache<P: AsRef<Path>>(ue: P) {
 
     dependencies.into_par_iter().for_each(|dep| {
         if let Err(e) = cache(&dep) {
-            bar.println(format!("error caching {}: {}", root.join(dep.name).display(), e));
+            bar.println(format!(
+                "error caching {}: {}",
+                root.join(dep.name).display(),
+                e
+            ));
         }
         bar.inc(1);
     });
